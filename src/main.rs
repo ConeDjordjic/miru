@@ -1,4 +1,5 @@
 mod config;
+mod loki;
 
 fn main() {
     let config = config::Config::load().unwrap_or_else(|e| {
