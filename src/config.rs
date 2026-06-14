@@ -58,10 +58,20 @@ impl Config {
                 path.display()
             )
         })?;
-        let config = Self::from_str(&contents)?;
+        let mut config = Self::from_str(&contents)?;
+        config.apply_env_overrides();
         Ok(config)
     }
 
+    // MIRU_API_KEY takes precedence over the token in the file, so the secret
+    // can come from the environment instead of living on disk.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(key) = std::env::var("MIRU_API_KEY")
+            && !key.is_empty()
+        {
+            self.grafana.api_key = Some(key);
+        }
+    }
 }
 
 impl Config {
@@ -192,6 +202,26 @@ service_label = "job"
         assert_eq!(cfg.grafana.username, None);
     }
 
+    #[test]
+    fn env_var_overrides_and_sets_api_key() {
+        unsafe {
+            std::env::set_var("MIRU_API_KEY", "env-key");
+        }
+
+        // overrides a value from the file
+        let mut from_file = Config::from_str(full_toml()).unwrap();
+        from_file.apply_env_overrides();
+        assert_eq!(from_file.grafana.api_key, Some("env-key".to_string()));
+
+        // sets the key when the file has none
+        let mut without_key = Config::from_str(no_api_key_toml()).unwrap();
+        without_key.apply_env_overrides();
+
+        unsafe {
+            std::env::remove_var("MIRU_API_KEY");
+        }
+        assert_eq!(without_key.grafana.api_key, Some("env-key".to_string()));
+    }
 
     #[test]
     fn parses_level_label() {
