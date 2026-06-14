@@ -1,0 +1,38 @@
+# Copy this file to ~/.config/miru/config.toml and fill in your values.
+# Or set MIRU_CONFIG=/path/to/your/config.toml to use a custom location.
+#
+# miru auto-detects whether the URL points to a Grafana instance or a
+# direct Loki endpoint. No mode configuration needed.
+
+[grafana]
+# Base URL of your Grafana instance or a direct Loki endpoint. No trailing slash.
+url = "https://grafana.yourcompany.com"
+
+# Grafana service account token (Users and Access > Service Accounts > Add token)
+# Bearer auth. Omit entirely for unauthenticated Loki (e.g. internal VPN-only).
+#
+# Recommended: set the MIRU_API_KEY environment variable instead of putting the
+# token here. When set, it overrides this value and keeps the secret off disk.
+api_key = "glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# For Grafana Cloud direct Loki access: set username to your numeric org ID.
+# When set, api_key is used as the password (Basic auth instead of Bearer).
+# username = "123456"
+
+# Override which Grafana datasource to use. Defaults to the first Loki-type datasource.
+# Only needed when you have multiple Loki datasources.
+# datasource = "Loki"
+
+[loki]
+# The Loki label key that identifies services in your streams. "app" and "job" are both common.
+service_label = "app"
+
+# Optional: the Loki label key that holds the log level in your streams.
+# When set, level filtering uses a label selector ({app="auth", level="error"})
+# which is faster than a regex scan. Omit if your logs don't have a dedicated level label.
+# Common values: "level", "severity", "log_level"
+# level_label = "level"
+
+# Optional: override default limits
+# default_limit = 200   # lines returned when the model doesn't specify
+# max_limit = 1000      # hard cap, model cannot exceed this
