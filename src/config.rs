@@ -6,6 +6,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub grafana: GrafanaConfig,
     pub loki: LokiConfig,
+    #[allow(dead_code)]
+    pub prometheus: Option<PrometheusConfig>,
 }
 
 #[derive(Deserialize)]
@@ -31,10 +33,24 @@ impl std::fmt::Debug for GrafanaConfig {
 pub struct LokiConfig {
     pub service_label: String,
     pub level_label: Option<String>,
+    #[allow(dead_code)]
+    pub datasource: Option<String>,
     #[serde(default = "default_limit")]
     pub default_limit: u32,
     #[serde(default = "max_limit")]
     pub max_limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PrometheusConfig {
+    pub datasource: Option<String>,
+    #[serde(default = "default_target_points")]
+    pub target_points: u32,
+    #[serde(default = "default_max_series")]
+    pub max_series: u32,
+    #[serde(default = "default_min_step_seconds")]
+    pub min_step_seconds: u32,
 }
 
 fn default_limit() -> u32 {
@@ -43,6 +59,18 @@ fn default_limit() -> u32 {
 
 fn max_limit() -> u32 {
     1000
+}
+
+fn default_target_points() -> u32 {
+    100
+}
+
+fn default_max_series() -> u32 {
+    20
+}
+
+fn default_min_step_seconds() -> u32 {
+    15
 }
 
 impl Config {
@@ -221,6 +249,69 @@ service_label = "job"
             std::env::remove_var("MIRU_API_KEY");
         }
         assert_eq!(without_key.grafana.api_key, Some("env-key".to_string()));
+    }
+
+    #[test]
+    fn no_prometheus_section_is_none() {
+        let cfg = Config::from_str(minimal_toml()).unwrap();
+        assert!(cfg.prometheus.is_none());
+    }
+
+    #[test]
+    fn parses_prometheus_section_with_defaults() {
+        let cfg = Config::from_str(
+            r#"
+[grafana]
+url = "http://localhost:3000"
+[loki]
+service_label = "app"
+[prometheus]
+datasource = "Prometheus"
+"#,
+        )
+        .unwrap();
+        let prom = cfg.prometheus.unwrap();
+        assert_eq!(prom.datasource, Some("Prometheus".to_string()));
+        assert_eq!(prom.target_points, 100);
+        assert_eq!(prom.max_series, 20);
+        assert_eq!(prom.min_step_seconds, 15);
+    }
+
+    #[test]
+    fn parses_prometheus_overrides() {
+        let cfg = Config::from_str(
+            r#"
+[grafana]
+url = "http://localhost:3000"
+[loki]
+service_label = "app"
+[prometheus]
+target_points = 250
+max_series = 5
+min_step_seconds = 30
+"#,
+        )
+        .unwrap();
+        let prom = cfg.prometheus.unwrap();
+        assert_eq!(prom.datasource, None);
+        assert_eq!(prom.target_points, 250);
+        assert_eq!(prom.max_series, 5);
+        assert_eq!(prom.min_step_seconds, 30);
+    }
+
+    #[test]
+    fn parses_loki_datasource() {
+        let cfg = Config::from_str(
+            r#"
+[grafana]
+url = "http://localhost:3000"
+[loki]
+service_label = "app"
+datasource = "LokiProd"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.loki.datasource, Some("LokiProd".to_string()));
     }
 
     #[test]
