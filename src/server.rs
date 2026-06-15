@@ -185,4 +185,32 @@ mod tests {
             .await;
         assert_eq!(result, Ok("No logs found in this time window.".to_string()));
     }
+
+    #[tokio::test]
+    async fn invalid_level_returns_actionable_error_before_any_http() {
+        let loki = Arc::new(crate::loki::LokiClient::new(
+            "http://127.0.0.1:1",
+            crate::backend::Auth::Bearer("test".into()),
+            "app",
+            None,
+            200,
+            1000,
+        ));
+        let miru = MiruServer { loki };
+        let err = miru
+            .query_logs(Parameters(QueryLogsParams {
+                service: "auth".into(),
+                lookback_minutes: Some(30),
+                start: None,
+                end: None,
+                limit: None,
+                level: Some("foo bar".into()),
+                search: None,
+                regex: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("invalid level"), "got: {err}");
+        assert!(err.contains("error, warn"), "got: {err}");
+    }
 }
