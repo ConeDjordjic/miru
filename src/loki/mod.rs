@@ -184,22 +184,6 @@ impl LokiClient {
             .collect();
         Ok(lines)
     }
-
-    pub fn default_limit(&self) -> u32 {
-        self.default_limit
-    }
-
-    pub fn max_limit(&self) -> u32 {
-        self.max_limit
-    }
-
-    pub fn service_label(&self) -> &str {
-        &self.service_label
-    }
-
-    pub fn level_label(&self) -> Option<&str> {
-        self.level_label.as_deref()
-    }
 }
 
 #[cfg(test)]

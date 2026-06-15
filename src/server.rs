@@ -26,20 +26,6 @@ fn resolve_time_window(
     }
 }
 
-// Level names go into a LogQL query, so restrict them to word characters.
-fn validate_level(level: &str) -> Result<(), String> {
-    if level.is_empty()
-        || !level
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
-            "invalid level {level:?}: use a single level name like error, warn, crit, or trace"
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Deserialize, JsonSchema)]
 struct QueryLogsParams {
     #[schemars(description = "Service name (from list_services)")]
@@ -91,9 +77,6 @@ impl MiruServer {
         Parameters(p): Parameters<QueryLogsParams>,
     ) -> Result<String, String> {
         let (start, end) = resolve_time_window(p.start, p.end, p.lookback_minutes);
-        if let Some(ref level) = p.level {
-            validate_level(level)?;
-        }
         let request = LogRequest {
             service: p.service,
             start,
@@ -163,22 +146,6 @@ mod tests {
         let start = chrono::DateTime::parse_from_rfc3339(&s).unwrap();
         let end = chrono::DateTime::parse_from_rfc3339(&e).unwrap();
         assert_eq!((end - start).num_days(), 30);
-    }
-
-    #[test]
-    fn validate_level_accepts_common_names() {
-        for lvl in [
-            "error", "warn", "ERROR", "crit", "trace", "err", "level_5", "0",
-        ] {
-            assert!(validate_level(lvl).is_ok(), "rejected {lvl}");
-        }
-    }
-
-    #[test]
-    fn validate_level_rejects_injection_payload() {
-        assert!(validate_level("error` |~ `secret").is_err());
-        assert!(validate_level("a b").is_err());
-        assert!(validate_level("").is_err());
     }
 
     #[tokio::test]

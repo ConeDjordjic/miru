@@ -8,7 +8,7 @@ pub struct LogRequest {
     pub limit: Option<u32>,
 }
 
-pub struct LogQuery {
+pub(crate) struct LogQuery {
     pub service_label: String,
     pub service: String,
     pub start: String,
@@ -20,7 +20,7 @@ pub struct LogQuery {
     pub search_is_regex: bool,
 }
 
-pub fn resolve_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
+pub(crate) fn resolve_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
     requested.unwrap_or(default).min(max)
 }
 
@@ -44,7 +44,7 @@ fn validate_level(level: &str) -> anyhow::Result<()> {
 }
 
 impl LogQuery {
-    pub fn to_logql(&self) -> anyhow::Result<String> {
+    pub(crate) fn to_logql(&self) -> anyhow::Result<String> {
         if let Some(lvl) = &self.level {
             validate_level(lvl)?;
         }
@@ -79,7 +79,7 @@ impl LogQuery {
         })
     }
 
-    pub fn to_params(&self) -> anyhow::Result<Vec<(String, String)>> {
+    pub(crate) fn to_params(&self) -> anyhow::Result<Vec<(String, String)>> {
         Ok(vec![
             ("query".into(), self.to_logql()?),
             ("start".into(), self.start.clone()),
