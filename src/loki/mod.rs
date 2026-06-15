@@ -95,20 +95,15 @@ impl LokiClient {
         }
     }
 
-    pub async fn list_services(&self) -> Result<Vec<String>> {
-        let url = format!(
-            "{}/loki/api/v1/label/{}/values",
-            self.base_url, self.service_label
-        );
-        let now = Utc::now();
-        let end = now.timestamp_nanos_opt().unwrap_or(0);
-        let start = (now - chrono::Duration::days(30))
-            .timestamp_nanos_opt()
-            .unwrap_or(0);
+    async fn get_json<T, Q>(&self, url: &str, params: &Q) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        Q: serde::Serialize + ?Sized,
+    {
         let resp = self
             .auth
-            .apply(self.http.get(&url))
-            .query(&[("start", start), ("end", end)])
+            .apply(self.http.get(url))
+            .query(params)
             .send()
             .await
             .map_err(|e| {
@@ -129,7 +124,21 @@ impl LokiClient {
             bail!("Loki returned HTTP {s}: {}", truncate_body(&body));
         }
 
-        let parsed: LabelValuesResponse = resp.json().await?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn list_services(&self) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/loki/api/v1/label/{}/values",
+            self.base_url, self.service_label
+        );
+        let now = Utc::now();
+        let end = now.timestamp_nanos_opt().unwrap_or(0);
+        let start = (now - chrono::Duration::days(30))
+            .timestamp_nanos_opt()
+            .unwrap_or(0);
+        let parsed: LabelValuesResponse =
+            self.get_json(&url, &[("start", start), ("end", end)]).await?;
         Ok(parsed.data)
     }
 
@@ -146,31 +155,7 @@ impl LokiClient {
             search_is_regex: req.search_is_regex,
         };
         let url = format!("{}/loki/api/v1/query_range", self.base_url);
-        let resp = self
-            .auth
-            .apply(self.http.get(&url))
-            .query(&query.to_params()?)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    anyhow::anyhow!("cannot connect to Loki: {e}")
-                } else {
-                    anyhow::anyhow!("{e}")
-                }
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let s = status.as_u16();
-            if matches!(s, 401 | 403 | 404) || s >= 500 {
-                bail!("{}", map_http_error(s));
-            }
-            let body = resp.text().await.unwrap_or_default();
-            bail!("Loki returned HTTP {s}: {}", truncate_body(&body));
-        }
-
-        let parsed: QueryRangeResponse = resp.json().await?;
+        let parsed: QueryRangeResponse = self.get_json(&url, &query.to_params()?).await?;
         let lines: Vec<String> = parsed
             .data
             .result
