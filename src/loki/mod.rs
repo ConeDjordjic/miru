@@ -2,7 +2,7 @@ pub mod query;
 
 use anyhow::{Result, bail};
 use chrono::Utc;
-use query::LogQuery;
+use query::{LogQuery, LogRequest};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -133,7 +133,18 @@ impl LokiClient {
         Ok(parsed.data)
     }
 
-    pub async fn query_logs(&self, query: &LogQuery) -> Result<Vec<String>> {
+    pub async fn query_logs(&self, req: &LogRequest) -> Result<Vec<String>> {
+        let query = LogQuery {
+            service_label: self.service_label.clone(),
+            service: req.service.clone(),
+            start: req.start.clone(),
+            end: req.end.clone(),
+            limit: query::resolve_limit(req.limit, self.default_limit, self.max_limit),
+            level: req.level.clone(),
+            level_label: self.level_label.clone(),
+            search: req.search.clone(),
+            search_is_regex: req.search_is_regex,
+        };
         let url = format!("{}/loki/api/v1/query_range", self.base_url);
         let resp = self
             .auth
@@ -259,19 +270,16 @@ mod tests {
             .await;
 
         let client = make_client(&server.url());
-        let query = crate::loki::query::LogQuery {
-            service_label: "app".into(),
+        let request = crate::loki::query::LogRequest {
             service: "auth".into(),
             start: "2026-06-12T13:00:00Z".into(),
             end: "2026-06-12T14:00:00Z".into(),
-            limit: 50,
-            max_limit: 1000,
             level: None,
-            level_label: None,
             search: None,
             search_is_regex: false,
+            limit: Some(50),
         };
-        let lines = client.query_logs(&query).await.unwrap();
+        let lines = client.query_logs(&request).await.unwrap();
         assert_eq!(
             lines,
             vec![
@@ -305,19 +313,16 @@ mod tests {
             .await;
 
         let client = make_client(&server.url());
-        let query = crate::loki::query::LogQuery {
-            service_label: "app".into(),
+        let request = crate::loki::query::LogRequest {
             service: "auth".into(),
             start: "2026-01-01T00:00:00Z".into(),
             end: "2026-06-14T00:00:00Z".into(),
-            limit: 50,
-            max_limit: 1000,
             level: None,
-            level_label: None,
             search: None,
             search_is_regex: false,
+            limit: Some(50),
         };
-        let err = client.query_logs(&query).await.unwrap_err().to_string();
+        let err = client.query_logs(&request).await.unwrap_err().to_string();
         assert!(err.contains("400"), "got: {err}");
         assert!(err.contains("query time range exceeds limit"), "got: {err}");
     }

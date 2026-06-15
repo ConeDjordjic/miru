@@ -8,7 +8,7 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::loki::{LokiClient, query::LogQuery};
+use crate::loki::{LokiClient, query::LogRequest};
 
 fn resolve_time_window(
     start: Option<String>,
@@ -94,21 +94,18 @@ impl MiruServer {
         if let Some(ref level) = p.level {
             validate_level(level)?;
         }
-        let query = LogQuery {
-            service_label: self.loki.service_label().to_string(),
+        let request = LogRequest {
             service: p.service,
             start,
             end,
-            limit: p.limit.unwrap_or_else(|| self.loki.default_limit()),
-            max_limit: self.loki.max_limit(),
             level: p.level,
-            level_label: self.loki.level_label().map(String::from),
             search: p.search,
             search_is_regex: p.regex.unwrap_or(false),
+            limit: p.limit,
         };
         let lines = self
             .loki
-            .query_logs(&query)
+            .query_logs(&request)
             .await
             .map_err(|e| e.to_string())?;
         if lines.is_empty() {

@@ -1,14 +1,27 @@
+pub struct LogRequest {
+    pub service: String,
+    pub start: String,
+    pub end: String,
+    pub level: Option<String>,
+    pub search: Option<String>,
+    pub search_is_regex: bool,
+    pub limit: Option<u32>,
+}
+
 pub struct LogQuery {
     pub service_label: String,
     pub service: String,
     pub start: String,
     pub end: String,
     pub limit: u32,
-    pub max_limit: u32,
     pub level: Option<String>,
     pub level_label: Option<String>,
     pub search: Option<String>,
     pub search_is_regex: bool,
+}
+
+pub fn resolve_limit(requested: Option<u32>, default: u32, max: u32) -> u32 {
+    requested.unwrap_or(default).min(max)
 }
 
 fn escape_logql(s: &str) -> String {
@@ -67,12 +80,11 @@ impl LogQuery {
     }
 
     pub fn to_params(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let effective_limit = self.limit.min(self.max_limit);
         Ok(vec![
             ("query".into(), self.to_logql()?),
             ("start".into(), self.start.clone()),
             ("end".into(), self.end.clone()),
-            ("limit".into(), effective_limit.to_string()),
+            ("limit".into(), self.limit.to_string()),
             ("direction".into(), "backward".into()),
         ])
     }
@@ -89,7 +101,6 @@ mod tests {
             start: "2026-06-12T13:00:00Z".into(),
             end: "2026-06-12T14:00:00Z".into(),
             limit: 50,
-            max_limit: 1000,
             level: None,
             level_label: None,
             search: None,
@@ -214,18 +225,10 @@ mod tests {
     }
 
     #[test]
-    fn limit_clamped_to_max() {
-        let mut q = base_query();
-        q.limit = 9999;
-        q.max_limit = 1000;
-        let params = q.to_params().unwrap();
-        assert_eq!(
-            params
-                .iter()
-                .find(|(k, _)| k == "limit")
-                .map(|(_, v)| v.as_str()),
-            Some("1000")
-        );
+    fn resolve_limit_defaults_then_clamps() {
+        assert_eq!(resolve_limit(None, 200, 1000), 200);
+        assert_eq!(resolve_limit(Some(9999), 200, 1000), 1000);
+        assert_eq!(resolve_limit(Some(50), 200, 1000), 50);
     }
 
     #[test]
