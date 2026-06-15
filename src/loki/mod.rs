@@ -1,10 +1,11 @@
 pub mod query;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use chrono::Utc;
 use query::{LogQuery, LogRequest};
 use serde::Deserialize;
-use std::time::Duration;
+
+use crate::backend::Endpoint;
 
 fn format_ns_timestamp(ns_str: &str) -> String {
     let ns: i64 = match ns_str.parse() {
@@ -18,36 +19,12 @@ fn format_ns_timestamp(ns_str: &str) -> String {
         .unwrap_or_else(|| ns_str.to_string())
 }
 
-fn map_http_error(status: u16) -> String {
-    match status {
-        401 => "authentication failed".into(),
-        403 => "access denied".into(),
-        404 => "endpoint not found".into(),
-        s if s >= 500 => format!("server error (HTTP {s})"),
-        s => format!("HTTP {s}"),
-    }
-}
-
-// Keep just enough of an unexpected response body to be useful, without
-// dumping a large page into the caller's output.
-fn truncate_body(body: &str) -> String {
-    const MAX: usize = 500;
-    if body.chars().count() > MAX {
-        let head: String = body.chars().take(MAX).collect();
-        format!("{head} (truncated)")
-    } else {
-        body.to_string()
-    }
-}
-
 pub struct LokiClient {
-    base_url: String,
-    auth: crate::backend::Auth,
+    endpoint: Endpoint,
     service_label: String,
     level_label: Option<String>,
     default_limit: u32,
     max_limit: u32,
-    http: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -80,65 +57,26 @@ impl LokiClient {
         default_limit: u32,
         max_limit: u32,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("failed to build HTTP client");
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            auth,
+            endpoint: Endpoint::new(base_url, auth, "Loki"),
             service_label: service_label.to_string(),
             level_label: level_label.map(String::from),
             default_limit,
             max_limit,
-            http,
         }
-    }
-
-    async fn get_json<T, Q>(&self, url: &str, params: &Q) -> Result<T>
-    where
-        T: serde::de::DeserializeOwned,
-        Q: serde::Serialize + ?Sized,
-    {
-        let resp = self
-            .auth
-            .apply(self.http.get(url))
-            .query(params)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    anyhow::anyhow!("cannot connect to Loki: {e}")
-                } else {
-                    anyhow::anyhow!("{e}")
-                }
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let s = status.as_u16();
-            if matches!(s, 401 | 403 | 404) || s >= 500 {
-                bail!("{}", map_http_error(s));
-            }
-            let body = resp.text().await.unwrap_or_default();
-            bail!("Loki returned HTTP {s}: {}", truncate_body(&body));
-        }
-
-        Ok(resp.json().await?)
     }
 
     pub async fn list_services(&self) -> Result<Vec<String>> {
-        let url = format!(
-            "{}/loki/api/v1/label/{}/values",
-            self.base_url, self.service_label
-        );
+        let path = format!("/loki/api/v1/label/{}/values", self.service_label);
         let now = Utc::now();
         let end = now.timestamp_nanos_opt().unwrap_or(0);
         let start = (now - chrono::Duration::days(30))
             .timestamp_nanos_opt()
             .unwrap_or(0);
-        let parsed: LabelValuesResponse =
-            self.get_json(&url, &[("start", start), ("end", end)]).await?;
+        let parsed: LabelValuesResponse = self
+            .endpoint
+            .get_json(&path, &[("start", start), ("end", end)])
+            .await?;
         Ok(parsed.data)
     }
 
@@ -154,8 +92,10 @@ impl LokiClient {
             search: req.search.clone(),
             search_is_regex: req.search_is_regex,
         };
-        let url = format!("{}/loki/api/v1/query_range", self.base_url);
-        let parsed: QueryRangeResponse = self.get_json(&url, &query.to_params()?).await?;
+        let parsed: QueryRangeResponse = self
+            .endpoint
+            .get_json("/loki/api/v1/query_range", &query.to_params()?)
+            .await?;
         let lines: Vec<String> = parsed
             .data
             .result

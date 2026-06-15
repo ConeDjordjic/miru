@@ -22,6 +22,84 @@ impl Auth {
     }
 }
 
+fn map_http_error(status: u16) -> String {
+    match status {
+        401 => "authentication failed".into(),
+        403 => "access denied".into(),
+        404 => "endpoint not found".into(),
+        s if s >= 500 => format!("server error (HTTP {s})"),
+        s => format!("HTTP {s}"),
+    }
+}
+
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 500;
+    if body.chars().count() > MAX {
+        let head: String = body.chars().take(MAX).collect();
+        format!("{head} (truncated)")
+    } else {
+        body.to_string()
+    }
+}
+
+pub struct Endpoint {
+    base_url: String,
+    auth: Auth,
+    name: &'static str,
+    http: Client,
+}
+
+impl Endpoint {
+    pub fn new(base_url: &str, auth: Auth, name: &'static str) -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to build HTTP client");
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth,
+            name,
+            http,
+        }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    pub async fn get_json<T, Q>(&self, path: &str, params: &Q) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        Q: serde::Serialize + ?Sized,
+    {
+        let resp = self
+            .auth
+            .apply(self.http.get(self.url(path)))
+            .query(params)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    anyhow::anyhow!("cannot connect to {}: {e}", self.name)
+                } else {
+                    anyhow::anyhow!("{e}")
+                }
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let s = status.as_u16();
+            if matches!(s, 401 | 403 | 404) || s >= 500 {
+                bail!("{}", map_http_error(s));
+            }
+            let body = resp.text().await.unwrap_or_default();
+            bail!("{} returned HTTP {s}: {}", self.name, truncate_body(&body));
+        }
+
+        Ok(resp.json().await?)
+    }
+}
+
 #[derive(Debug)]
 pub struct ResolvedBackend {
     pub base_url: String,
@@ -165,6 +243,34 @@ mod tests {
             datasource: None,
         };
         assert!(build_auth(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn endpoint_connect_error_names_the_backend() {
+        let endpoint = Endpoint::new("http://127.0.0.1:1", Auth::None, "Prometheus");
+        let err = endpoint
+            .get_json::<serde_json::Value, _>("/api/v1/query", &[("query", "up")])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot connect to Prometheus"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn endpoint_maps_404_to_friendly_message() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(404)
+            .create_async()
+            .await;
+        let endpoint = Endpoint::new(&server.url(), Auth::None, "Prometheus");
+        let err = endpoint
+            .get_json::<serde_json::Value, _>("/api/v1/query", &[("query", "up")])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("endpoint not found"), "got: {err}");
     }
 
     #[tokio::test]
