@@ -138,7 +138,7 @@ impl LokiClient {
         let resp = self
             .auth
             .apply(self.http.get(&url))
-            .query(&query.to_params())
+            .query(&query.to_params()?)
             .send()
             .await
             .map_err(|e| {
