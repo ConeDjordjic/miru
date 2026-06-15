@@ -1,6 +1,8 @@
 mod backend;
 mod config;
 mod loki;
+#[allow(dead_code)]
+mod prometheus;
 mod server;
 
 use std::sync::Arc;
