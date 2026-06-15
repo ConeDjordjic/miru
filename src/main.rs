@@ -15,13 +15,14 @@ async fn main() {
         eprintln!("miru: {e}");
         std::process::exit(1);
     }
-    let resolved = backend::resolve(&config.grafana).await.unwrap_or_else(|e| {
+    let resolved = backend::resolve(&config).await.unwrap_or_else(|e| {
         eprintln!("miru: {e:#}");
         std::process::exit(1);
     });
+    let loki_backend = resolved.loki.expect("loki backend is required");
     let loki = Arc::new(loki::LokiClient::new(
-        &resolved.base_url,
-        resolved.auth,
+        &loki_backend.base_url,
+        loki_backend.auth,
         &config.loki.service_label,
         config.loki.level_label.as_deref(),
         config.loki.default_limit,

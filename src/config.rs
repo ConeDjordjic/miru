@@ -6,7 +6,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub grafana: GrafanaConfig,
     pub loki: LokiConfig,
-    #[allow(dead_code)]
     pub prometheus: Option<PrometheusConfig>,
 }
 
@@ -33,7 +32,6 @@ impl std::fmt::Debug for GrafanaConfig {
 pub struct LokiConfig {
     pub service_label: String,
     pub level_label: Option<String>,
-    #[allow(dead_code)]
     pub datasource: Option<String>,
     #[serde(default = "default_limit")]
     pub default_limit: u32,

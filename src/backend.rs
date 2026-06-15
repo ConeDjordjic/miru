@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
-use crate::config::GrafanaConfig;
+use crate::config::{Config, GrafanaConfig};
 
 #[derive(Clone, Debug)]
 pub enum Auth {
@@ -106,6 +106,13 @@ pub struct ResolvedBackend {
     pub auth: Auth,
 }
 
+#[derive(Debug)]
+pub struct ResolvedBackends {
+    pub loki: Option<ResolvedBackend>,
+    #[allow(dead_code)]
+    pub prometheus: Option<ResolvedBackend>,
+}
+
 #[derive(Deserialize)]
 struct GrafanaHealth {
     database: String,
@@ -131,13 +138,14 @@ fn build_auth(config: &GrafanaConfig) -> Result<Auth> {
     }
 }
 
-pub async fn resolve(config: &GrafanaConfig) -> Result<ResolvedBackend> {
-    let auth = build_auth(config)?;
+pub async fn resolve(config: &Config) -> Result<ResolvedBackends> {
+    let grafana = &config.grafana;
+    let auth = build_auth(grafana)?;
     let http = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-    let base = config.url.trim_end_matches('/');
+    let base = grafana.url.trim_end_matches('/');
 
-    // If it's Grafana, route through the datasource proxy.
+    // If it's Grafana, route each backend through the datasource proxy.
     if let Ok(resp) = auth
         .apply(http.get(format!("{base}/api/health")))
         .send()
@@ -149,28 +157,51 @@ pub async fn resolve(config: &GrafanaConfig) -> Result<ResolvedBackend> {
         return resolve_grafana(&http, config, base, auth).await;
     }
 
-    // Otherwise try Loki directly.
+    // Otherwise talk to a single backend directly. Dual-backend needs Grafana.
+    if config.prometheus.is_some() {
+        bail!("a [prometheus] backend requires Grafana; point grafana.url at a Grafana instance");
+    }
     if let Ok(resp) = auth
         .apply(http.get(format!("{base}/loki/api/v1/labels")))
         .send()
         .await
         && resp.status().is_success()
     {
-        return Ok(ResolvedBackend {
-            base_url: base.to_string(),
-            auth,
+        return Ok(ResolvedBackends {
+            loki: Some(ResolvedBackend {
+                base_url: base.to_string(),
+                auth,
+            }),
+            prometheus: None,
         });
     }
 
     bail!("could not connect to Grafana or Loki at {base}")
 }
 
+fn select_datasource<'a>(
+    all: &'a [Datasource],
+    kind: &str,
+    name: Option<&str>,
+) -> Result<&'a Datasource> {
+    match name {
+        Some(name) => all
+            .iter()
+            .find(|ds| ds.kind == kind && ds.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no {kind} datasource named {name:?} found in Grafana")),
+        None => all
+            .iter()
+            .find(|ds| ds.kind == kind)
+            .ok_or_else(|| anyhow::anyhow!("no {kind} datasource found in Grafana")),
+    }
+}
+
 async fn resolve_grafana(
     http: &Client,
-    config: &GrafanaConfig,
+    config: &Config,
     base: &str,
     auth: Auth,
-) -> Result<ResolvedBackend> {
+) -> Result<ResolvedBackends> {
     let resp = auth
         .apply(http.get(format!("{base}/api/datasources")))
         .send()
@@ -183,22 +214,34 @@ async fn resolve_grafana(
     }
 
     let all: Vec<Datasource> = resp.json().await?;
-    let loki: Vec<Datasource> = all.into_iter().filter(|ds| ds.kind == "loki").collect();
+    let proxy = |ds: &Datasource| format!("{base}/api/datasources/proxy/uid/{}", ds.uid);
 
-    let selected = match &config.datasource {
-        Some(name) => loki
-            .into_iter()
-            .find(|ds| &ds.name == name)
-            .ok_or_else(|| anyhow::anyhow!("no Loki datasource named {name:?} found in Grafana"))?,
-        None => loki
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("no Loki datasource found in Grafana"))?,
+    // loki.datasource, falling back to the deprecated grafana.datasource alias.
+    let loki_name = config
+        .loki
+        .datasource
+        .as_deref()
+        .or(config.grafana.datasource.as_deref());
+    let loki_ds = select_datasource(&all, "loki", loki_name)?;
+    let loki = ResolvedBackend {
+        base_url: proxy(loki_ds),
+        auth: auth.clone(),
     };
 
-    Ok(ResolvedBackend {
-        base_url: format!("{base}/api/datasources/proxy/uid/{}", selected.uid),
-        auth,
+    let prometheus = match &config.prometheus {
+        Some(pc) => {
+            let ds = select_datasource(&all, "prometheus", pc.datasource.as_deref())?;
+            Some(ResolvedBackend {
+                base_url: proxy(ds),
+                auth: auth.clone(),
+            })
+        }
+        None => None,
+    };
+
+    Ok(ResolvedBackends {
+        loki: Some(loki),
+        prometheus,
     })
 }
 
@@ -207,12 +250,28 @@ mod tests {
     use super::*;
     use mockito::Server;
 
-    fn bearer_config(url: &str) -> GrafanaConfig {
-        GrafanaConfig {
-            url: url.to_string(),
-            api_key: Some("test-token".into()),
-            username: None,
+    use crate::config::{LokiConfig, PrometheusConfig};
+
+    fn loki_config() -> LokiConfig {
+        LokiConfig {
+            service_label: "app".into(),
+            level_label: None,
             datasource: None,
+            default_limit: 200,
+            max_limit: 1000,
+        }
+    }
+
+    fn bearer_config(url: &str) -> Config {
+        Config {
+            grafana: GrafanaConfig {
+                url: url.to_string(),
+                api_key: Some("test-token".into()),
+                username: None,
+                datasource: None,
+            },
+            loki: loki_config(),
+            prometheus: None,
         }
     }
 
@@ -294,7 +353,7 @@ mod tests {
 
         let backend = resolve(&bearer_config(&server.url())).await.unwrap();
         assert_eq!(
-            backend.base_url,
+            backend.loki.unwrap().base_url,
             format!("{}/api/datasources/proxy/uid/uid1", server.url())
         );
     }
@@ -317,17 +376,119 @@ mod tests {
             .create_async()
             .await;
 
-        let config = GrafanaConfig {
-            url: server.url(),
-            api_key: Some("test-token".into()),
-            username: None,
-            datasource: Some("LokiProd".into()),
-        };
+        let mut config = bearer_config(&server.url());
+        config.loki.datasource = Some("LokiProd".into());
         let backend = resolve(&config).await.unwrap();
         assert_eq!(
-            backend.base_url,
+            backend.loki.unwrap().base_url,
             format!("{}/api/datasources/proxy/uid/uid2", server.url())
         );
+    }
+
+    #[tokio::test]
+    async fn grafana_datasource_alias_selects_loki() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(grafana_health_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/datasources")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"uid":"uid1","name":"Loki","type":"loki"},{"uid":"uid2","name":"LokiProd","type":"loki"}]"#)
+            .create_async()
+            .await;
+
+        let mut config = bearer_config(&server.url());
+        config.grafana.datasource = Some("LokiProd".into());
+        let backend = resolve(&config).await.unwrap();
+        assert_eq!(
+            backend.loki.unwrap().base_url,
+            format!("{}/api/datasources/proxy/uid/uid2", server.url())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_both_loki_and_prometheus() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(grafana_health_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/datasources")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"uid":"lk","name":"Loki","type":"loki"},{"uid":"pr","name":"Prometheus","type":"prometheus"}]"#)
+            .create_async()
+            .await;
+
+        let mut config = bearer_config(&server.url());
+        config.prometheus = Some(PrometheusConfig {
+            datasource: None,
+            target_points: 100,
+            max_series: 20,
+            min_step_seconds: 15,
+        });
+        let backend = resolve(&config).await.unwrap();
+        assert_eq!(
+            backend.loki.unwrap().base_url,
+            format!("{}/api/datasources/proxy/uid/lk", server.url())
+        );
+        assert_eq!(
+            backend.prometheus.unwrap().base_url,
+            format!("{}/api/datasources/proxy/uid/pr", server.url())
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_error_when_prometheus_configured_but_missing() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(grafana_health_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/datasources")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"uid":"lk","name":"Loki","type":"loki"}]"#)
+            .create_async()
+            .await;
+
+        let mut config = bearer_config(&server.url());
+        config.prometheus = Some(PrometheusConfig {
+            datasource: None,
+            target_points: 100,
+            max_series: 20,
+            min_step_seconds: 15,
+        });
+        let err = resolve(&config).await.unwrap_err().to_string();
+        assert!(err.contains("prometheus datasource"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn prometheus_requires_grafana_in_direct_mode() {
+        let server = Server::new_async().await;
+        let mut config = bearer_config(&server.url());
+        config.prometheus = Some(PrometheusConfig {
+            datasource: None,
+            target_points: 100,
+            max_series: 20,
+            min_step_seconds: 15,
+        });
+        let err = resolve(&config).await.unwrap_err().to_string();
+        assert!(err.contains("requires Grafana"), "got: {err}");
     }
 
     #[tokio::test]
@@ -348,12 +509,8 @@ mod tests {
             .create_async()
             .await;
 
-        let config = GrafanaConfig {
-            url: server.url(),
-            api_key: Some("test-token".into()),
-            username: None,
-            datasource: Some("Missing".into()),
-        };
+        let mut config = bearer_config(&server.url());
+        config.loki.datasource = Some("Missing".into());
         let err = resolve(&config).await.unwrap_err();
         assert!(err.to_string().contains("Missing"));
     }
@@ -372,7 +529,7 @@ mod tests {
 
         let backend = resolve(&bearer_config(&server.url())).await.unwrap();
         assert_eq!(
-            backend.base_url,
+            backend.loki.unwrap().base_url,
             server.url().trim_end_matches('/').to_string()
         );
     }
@@ -403,13 +560,10 @@ mod tests {
             .create_async()
             .await;
 
-        let config = GrafanaConfig {
-            url: server.url(),
-            api_key: Some("token".into()),
-            username: Some("123".into()),
-            datasource: None,
-        };
+        let mut config = bearer_config(&server.url());
+        config.grafana.api_key = Some("token".into());
+        config.grafana.username = Some("123".into());
         let backend = resolve(&config).await.unwrap();
-        assert!(matches!(backend.auth, Auth::Basic { .. }));
+        assert!(matches!(backend.loki.unwrap().auth, Auth::Basic { .. }));
     }
 }
