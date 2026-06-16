@@ -29,6 +29,20 @@ struct PromData {
 }
 
 #[derive(Deserialize)]
+struct MetadataResponse {
+    #[serde(default)]
+    data: BTreeMap<String, Vec<MetricMeta>>,
+}
+
+#[derive(Deserialize)]
+struct MetricMeta {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    help: String,
+}
+
+#[derive(Deserialize)]
 struct PromSeries {
     #[serde(default)]
     metric: BTreeMap<String, String>,
@@ -98,6 +112,14 @@ fn summarize(values: &[(f64, String)]) -> Option<String> {
     ))
 }
 
+fn format_metric(name: &str, meta: Option<&MetricMeta>) -> String {
+    match meta {
+        Some(m) if !m.help.is_empty() => format!("{name} ({}) {}", m.kind, m.help),
+        Some(m) => format!("{name} ({})", m.kind),
+        None => name.to_string(),
+    }
+}
+
 fn over_cap_note(total: usize, cap: usize) -> String {
     format!(
         "... {} more series; aggregate in PromQL (e.g. sum by (label)) to narrow",
@@ -152,6 +174,24 @@ impl PrometheusClient {
             max_series,
             min_step_seconds,
         }
+    }
+
+    pub async fn list_metrics(&self, filter: Option<&str>) -> Result<Vec<String>> {
+        let resp: MetadataResponse = self
+            .endpoint
+            .get_json("/api/v1/metadata", &Vec::<(&str, &str)>::new())
+            .await?;
+        let needle = filter.map(|f| f.to_lowercase());
+        let out = resp
+            .data
+            .iter()
+            .filter(|(name, _)| match &needle {
+                Some(n) => name.to_lowercase().contains(n.as_str()),
+                None => true,
+            })
+            .map(|(name, metas)| format_metric(name, metas.first()))
+            .collect();
+        Ok(out)
     }
 
     pub async fn query_metrics(&self, req: &MetricRequest) -> Result<Vec<String>> {
@@ -244,6 +284,27 @@ mod tests {
         assert_eq!(out, vec![r#"up{instance="web-1"} => 1"#.to_string()]);
     }
 
+    #[test]
+    fn metric_with_help_is_enriched() {
+        let meta = MetricMeta {
+            kind: "counter".into(),
+            help: "Total HTTP requests".into(),
+        };
+        assert_eq!(
+            format_metric("http_requests_total", Some(&meta)),
+            "http_requests_total (counter) Total HTTP requests"
+        );
+    }
+
+    #[test]
+    fn metric_without_help_shows_type_only() {
+        let meta = MetricMeta {
+            kind: "gauge".into(),
+            help: String::new(),
+        };
+        assert_eq!(format_metric("in_flight", Some(&meta)), "in_flight (gauge)");
+    }
+
     fn make_client(base_url: &str) -> PrometheusClient {
         PrometheusClient::new(
             base_url,
@@ -285,6 +346,30 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("max=88"), "got: {}", out[0]);
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn list_metrics_filters_and_enriches() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Regex(r"/api/v1/metadata.*".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"success","data":{
+                    "http_requests_total":[{"type":"counter","help":"Total HTTP requests"}],
+                    "node_cpu_seconds":[{"type":"counter","help":"CPU seconds"}]
+                }}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = make_client(&server.url());
+        let out = client.list_metrics(Some("http")).await.unwrap();
+        assert_eq!(
+            out,
+            vec!["http_requests_total (counter) Total HTTP requests".to_string()]
+        );
     }
 
     #[tokio::test]
