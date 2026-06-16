@@ -109,7 +109,6 @@ pub struct ResolvedBackend {
 #[derive(Debug)]
 pub struct ResolvedBackends {
     pub loki: Option<ResolvedBackend>,
-    #[allow(dead_code)]
     pub prometheus: Option<ResolvedBackend>,
 }
 

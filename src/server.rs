@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::loki::{LokiClient, query::LogRequest};
+use crate::prometheus::{PrometheusClient, query::MetricRequest};
 
 fn resolve_time_window(
     start: Option<String>,
@@ -54,9 +55,42 @@ struct QueryLogsParams {
     regex: Option<bool>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct QueryMetricsParams {
+    #[schemars(
+        description = "PromQL expression. Counters need a rate (e.g. rate(http_requests_total[5m])); gauges can be read directly. Discover metric names and their type with list_metrics first."
+    )]
+    promql: String,
+    #[schemars(
+        description = "How many minutes back to look from now. Preferred over start/end when you don't know the exact current time. Omit this and start/end to default to the last 30 days."
+    )]
+    lookback_minutes: Option<u32>,
+    #[schemars(
+        description = "Start time in ISO 8601 format. Only use if you know the exact current UTC time; otherwise use lookback_minutes."
+    )]
+    start: Option<String>,
+    #[schemars(description = "End time in ISO 8601 format. Required if start is provided.")]
+    end: Option<String>,
+    #[schemars(
+        description = "Resolution in seconds between data points. Omit to let miru pick a step that keeps the result readable."
+    )]
+    step: Option<u32>,
+    #[schemars(
+        description = "When true, evaluate at a single instant and return current values instead of a series over time."
+    )]
+    instant: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ListMetricsParams {
+    #[schemars(description = "Case-insensitive substring to filter metric names by")]
+    filter: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct MiruServer {
     loki: Arc<LokiClient>,
+    prometheus: Option<Arc<PrometheusClient>>,
 }
 
 #[tool_router]
@@ -97,17 +131,69 @@ impl MiruServer {
             Ok(lines.join("\n"))
         }
     }
+
+    #[tool(
+        description = "List metric names available in Prometheus, each with its type (counter, gauge, histogram) and help text. Call this first to discover metric names and whether a metric is a counter (use rate()) before writing PromQL. Optionally filter names by substring."
+    )]
+    async fn list_metrics(
+        &self,
+        Parameters(p): Parameters<ListMetricsParams>,
+    ) -> Result<String, String> {
+        let prometheus = self
+            .prometheus
+            .as_ref()
+            .ok_or_else(|| "prometheus is not configured".to_string())?;
+        let metrics = prometheus
+            .list_metrics(p.filter.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        if metrics.is_empty() {
+            Ok("No metrics found.".to_string())
+        } else {
+            Ok(metrics.join("\n"))
+        }
+    }
+
+    #[tool(
+        description = "Run a PromQL query against Prometheus to reason about metrics such as CPU, memory, or request rates. Returns a series over time by default (each series summarised with min/avg/max/peak then its data points); set instant=true for current values. Set the time range with lookback_minutes or start and end; if you give none it defaults to the last 30 days. Discover metric names with list_metrics first."
+    )]
+    async fn query_metrics(
+        &self,
+        Parameters(p): Parameters<QueryMetricsParams>,
+    ) -> Result<String, String> {
+        let prometheus = self
+            .prometheus
+            .as_ref()
+            .ok_or_else(|| "prometheus is not configured".to_string())?;
+        let (start, end) = resolve_time_window(p.start, p.end, p.lookback_minutes);
+        let request = MetricRequest {
+            promql: p.promql,
+            start,
+            end,
+            step: p.step,
+            instant: p.instant.unwrap_or(false),
+        };
+        let lines = prometheus
+            .query_metrics(&request)
+            .await
+            .map_err(|e| e.to_string())?;
+        if lines.is_empty() {
+            Ok("No data for this query.".to_string())
+        } else {
+            Ok(lines.join("\n"))
+        }
+    }
 }
 
 #[tool_handler(
     name = "miru",
     version = "0.1.0",
-    instructions = "Query Grafana Loki logs via miru. When describing what you're doing, say \"using miru\" not \"using Loki MCP tools\" or \"using the Loki API\". Use list_services first to discover services, then query_logs to fetch logs. Supports filtering by level (such as error, warn, info, debug, crit, trace) and searching by text or regex. Use lookback_minutes when the current time is not known precisely."
+    instructions = "Query Grafana Loki logs and Prometheus metrics via miru. When describing what you're doing, say \"using miru\" not \"using the Loki/Prometheus API\". For logs: use list_services first to discover services, then query_logs (filter by level such as error, warn, info, debug, crit, trace, and search by text or regex). For metrics: use list_metrics first to discover metric names and types, then query_metrics with PromQL (counters need rate(); set instant=true for current values). Use lookback_minutes when the current time is not known precisely. Metric tools return an error if Prometheus is not configured."
 )]
 impl ServerHandler for MiruServer {}
 
-pub async fn run(loki: Arc<LokiClient>) -> Result<()> {
-    MiruServer { loki }
+pub async fn run(loki: Arc<LokiClient>, prometheus: Option<Arc<PrometheusClient>>) -> Result<()> {
+    MiruServer { loki, prometheus }
         .serve(stdio())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -170,7 +256,10 @@ mod tests {
             200,
             1000,
         ));
-        let miru = MiruServer { loki };
+        let miru = MiruServer {
+            loki,
+            prometheus: None,
+        };
         let result = miru
             .query_logs(Parameters(QueryLogsParams {
                 service: "auth".into(),
@@ -196,7 +285,10 @@ mod tests {
             200,
             1000,
         ));
-        let miru = MiruServer { loki };
+        let miru = MiruServer {
+            loki,
+            prometheus: None,
+        };
         let err = miru
             .query_logs(Parameters(QueryLogsParams {
                 service: "auth".into(),
@@ -212,5 +304,79 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("invalid level"), "got: {err}");
         assert!(err.contains("error, warn"), "got: {err}");
+    }
+
+    fn unreachable_loki() -> Arc<crate::loki::LokiClient> {
+        Arc::new(crate::loki::LokiClient::new(
+            "http://127.0.0.1:1",
+            crate::backend::Auth::None,
+            "app",
+            None,
+            200,
+            1000,
+        ))
+    }
+
+    #[tokio::test]
+    async fn query_metrics_errors_when_prometheus_not_configured() {
+        let miru = MiruServer {
+            loki: unreachable_loki(),
+            prometheus: None,
+        };
+        let err = miru
+            .query_metrics(Parameters(QueryMetricsParams {
+                promql: "up".into(),
+                lookback_minutes: Some(30),
+                start: None,
+                end: None,
+                step: None,
+                instant: Some(true),
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("prometheus is not configured"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn query_metrics_returns_shaped_series() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/api/v1/query_range.*".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"success","data":{"resultType":"matrix","result":[
+                    {"metric":{"__name__":"cpu"},"values":[[1686000000,"5"],[1686000060,"50"]]}
+                ]}}"#,
+            )
+            .create_async()
+            .await;
+
+        let prometheus = Some(Arc::new(crate::prometheus::PrometheusClient::new(
+            &server.url(),
+            crate::backend::Auth::None,
+            100,
+            20,
+            15,
+        )));
+        let miru = MiruServer {
+            loki: unreachable_loki(),
+            prometheus,
+        };
+        let out = miru
+            .query_metrics(Parameters(QueryMetricsParams {
+                promql: "cpu".into(),
+                lookback_minutes: Some(60),
+                start: None,
+                end: None,
+                step: None,
+                instant: Some(false),
+            }))
+            .await
+            .unwrap();
+        assert!(out.contains("max=50"), "got: {out}");
     }
 }

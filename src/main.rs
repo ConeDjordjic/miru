@@ -1,7 +1,6 @@
 mod backend;
 mod config;
 mod loki;
-#[allow(dead_code)]
 mod prometheus;
 mod server;
 
@@ -30,7 +29,17 @@ async fn main() {
         config.loki.default_limit,
         config.loki.max_limit,
     ));
-    if let Err(e) = server::run(loki).await {
+    let prometheus = match (resolved.prometheus, &config.prometheus) {
+        (Some(backend), Some(pc)) => Some(Arc::new(prometheus::PrometheusClient::new(
+            &backend.base_url,
+            backend.auth,
+            pc.target_points,
+            pc.max_series,
+            pc.min_step_seconds,
+        ))),
+        _ => None,
+    };
+    if let Err(e) = server::run(loki, prometheus).await {
         eprintln!("miru: {e}");
         std::process::exit(1);
     }
