@@ -3,6 +3,10 @@
 #
 # miru auto-detects whether the URL points to a Grafana instance or a
 # direct Loki endpoint. No mode configuration needed.
+#
+# Configure [loki] for logs, [prometheus] for metrics, or both. At least one is
+# required. Serving both requires a Grafana instance (the two datasources are
+# proxied through it); a direct, non-Grafana URL supports a single backend.
 
 [grafana]
 # Base URL of your Grafana instance or a direct Loki endpoint. No trailing slash.
@@ -19,10 +23,11 @@ api_key = "glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 # When set, api_key is used as the password (Basic auth instead of Bearer).
 # username = "123456"
 
-# Override which Grafana datasource to use. Defaults to the first Loki-type datasource.
-# Only needed when you have multiple Loki datasources.
+# Deprecated alias for loki.datasource, kept for backwards compatibility.
+# Prefer setting datasource inside the [loki] / [prometheus] sections below.
 # datasource = "Loki"
 
+# Logs backend. Omit this section to run metrics-only.
 [loki]
 # The Loki label key that identifies services in your streams. "app" and "job" are both common.
 service_label = "app"
@@ -33,6 +38,24 @@ service_label = "app"
 # Common values: "level", "severity", "log_level"
 # level_label = "level"
 
+# Optional: which Grafana Loki datasource to use. Defaults to the first one found.
+# datasource = "Loki"
+
 # Optional: override default limits
 # default_limit = 200   # lines returned when the model doesn't specify
 # max_limit = 1000      # hard cap, model cannot exceed this
+
+# Metrics backend. Omit this section to run logs-only. Requires Grafana.
+# [prometheus]
+# Optional: which Grafana Prometheus datasource to use. Defaults to the first one found.
+# datasource = "Prometheus"
+
+# Optional: target number of data points per series in a range query. miru picks
+# a step from the time window to stay near this, keeping results readable.
+# target_points = 100
+
+# Optional: max series returned before miru asks the model to aggregate in PromQL.
+# max_series = 20
+
+# Optional: smallest step (seconds) miru will compute for a range query.
+# min_step_seconds = 15
