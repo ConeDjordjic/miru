@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub grafana: GrafanaConfig,
-    pub loki: LokiConfig,
+    pub loki: Option<LokiConfig>,
     pub prometheus: Option<PrometheusConfig>,
 }
 
@@ -111,7 +111,12 @@ impl Config {
                 self.grafana.url
             );
         }
-        if self.loki.service_label.is_empty() {
+        if self.loki.is_none() && self.prometheus.is_none() {
+            anyhow::bail!("configure at least one backend: add a [loki] or [prometheus] section");
+        }
+        if let Some(loki) = &self.loki
+            && loki.service_label.is_empty()
+        {
             anyhow::bail!("loki.service_label is required");
         }
         Ok(())
@@ -161,16 +166,18 @@ service_label = "job"
         let cfg = Config::from_str(full_toml()).unwrap();
         assert_eq!(cfg.grafana.url, "http://localhost:3000");
         assert_eq!(cfg.grafana.api_key, Some("test-key".to_string()));
-        assert_eq!(cfg.loki.service_label, "app");
-        assert_eq!(cfg.loki.default_limit, 100);
-        assert_eq!(cfg.loki.max_limit, 500);
+        let loki = cfg.loki.unwrap();
+        assert_eq!(loki.service_label, "app");
+        assert_eq!(loki.default_limit, 100);
+        assert_eq!(loki.max_limit, 500);
     }
 
     #[test]
     fn applies_defaults_for_limits() {
         let cfg = Config::from_str(minimal_toml()).unwrap();
-        assert_eq!(cfg.loki.default_limit, 200);
-        assert_eq!(cfg.loki.max_limit, 1000);
+        let loki = cfg.loki.unwrap();
+        assert_eq!(loki.default_limit, 200);
+        assert_eq!(loki.max_limit, 1000);
     }
 
     #[test]
@@ -309,7 +316,7 @@ datasource = "LokiProd"
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.loki.datasource, Some("LokiProd".to_string()));
+        assert_eq!(cfg.loki.unwrap().datasource, Some("LokiProd".to_string()));
     }
 
     #[test]
@@ -324,7 +331,7 @@ level_label = "level"
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.loki.level_label, Some("level".to_string()));
+        assert_eq!(cfg.loki.unwrap().level_label, Some("level".to_string()));
     }
 
     #[test]
@@ -358,6 +365,34 @@ service_label = "app"
             err.contains("http://") || err.contains("https://"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_no_backend() {
+        let cfg = Config::from_str(
+            r#"
+[grafana]
+url = "http://localhost:3000"
+"#,
+        )
+        .unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("at least one backend"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_prometheus_only() {
+        let cfg = Config::from_str(
+            r#"
+[grafana]
+url = "http://localhost:3000"
+[prometheus]
+datasource = "Prometheus"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.loki.is_none());
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

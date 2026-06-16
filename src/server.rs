@@ -89,7 +89,7 @@ struct ListMetricsParams {
 
 #[derive(Clone)]
 pub struct MiruServer {
-    loki: Arc<LokiClient>,
+    loki: Option<Arc<LokiClient>>,
     prometheus: Option<Arc<PrometheusClient>>,
 }
 
@@ -99,7 +99,11 @@ impl MiruServer {
         description = "List all service names available in Loki. Call this first to discover valid service names before querying logs."
     )]
     async fn list_services(&self) -> Result<String, String> {
-        let services = self.loki.list_services().await.map_err(|e| e.to_string())?;
+        let loki = self
+            .loki
+            .as_ref()
+            .ok_or_else(|| "loki is not configured".to_string())?;
+        let services = loki.list_services().await.map_err(|e| e.to_string())?;
         serde_json::to_string(&services).map_err(|e| e.to_string())
     }
 
@@ -110,6 +114,10 @@ impl MiruServer {
         &self,
         Parameters(p): Parameters<QueryLogsParams>,
     ) -> Result<String, String> {
+        let loki = self
+            .loki
+            .as_ref()
+            .ok_or_else(|| "loki is not configured".to_string())?;
         let (start, end) = resolve_time_window(p.start, p.end, p.lookback_minutes);
         let request = LogRequest {
             service: p.service,
@@ -120,11 +128,7 @@ impl MiruServer {
             search_is_regex: p.regex.unwrap_or(false),
             limit: p.limit,
         };
-        let lines = self
-            .loki
-            .query_logs(&request)
-            .await
-            .map_err(|e| e.to_string())?;
+        let lines = loki.query_logs(&request).await.map_err(|e| e.to_string())?;
         if lines.is_empty() {
             Ok("No logs found in this time window.".to_string())
         } else {
@@ -192,7 +196,10 @@ impl MiruServer {
 )]
 impl ServerHandler for MiruServer {}
 
-pub async fn run(loki: Arc<LokiClient>, prometheus: Option<Arc<PrometheusClient>>) -> Result<()> {
+pub async fn run(
+    loki: Option<Arc<LokiClient>>,
+    prometheus: Option<Arc<PrometheusClient>>,
+) -> Result<()> {
     MiruServer { loki, prometheus }
         .serve(stdio())
         .await
@@ -257,7 +264,7 @@ mod tests {
             1000,
         ));
         let miru = MiruServer {
-            loki,
+            loki: Some(loki),
             prometheus: None,
         };
         let result = miru
@@ -286,7 +293,7 @@ mod tests {
             1000,
         ));
         let miru = MiruServer {
-            loki,
+            loki: Some(loki),
             prometheus: None,
         };
         let err = miru
@@ -320,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn query_metrics_errors_when_prometheus_not_configured() {
         let miru = MiruServer {
-            loki: unreachable_loki(),
+            loki: Some(unreachable_loki()),
             prometheus: None,
         };
         let err = miru
@@ -363,7 +370,7 @@ mod tests {
             15,
         )));
         let miru = MiruServer {
-            loki: unreachable_loki(),
+            loki: Some(unreachable_loki()),
             prometheus,
         };
         let out = miru

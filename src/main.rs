@@ -20,15 +20,17 @@ async fn main() {
         eprintln!("miru: {e:#}");
         std::process::exit(1);
     });
-    let loki_backend = resolved.loki.expect("loki backend is required");
-    let loki = Arc::new(loki::LokiClient::new(
-        &loki_backend.base_url,
-        loki_backend.auth,
-        &config.loki.service_label,
-        config.loki.level_label.as_deref(),
-        config.loki.default_limit,
-        config.loki.max_limit,
-    ));
+    let loki = match (resolved.loki, &config.loki) {
+        (Some(backend), Some(lc)) => Some(Arc::new(loki::LokiClient::new(
+            &backend.base_url,
+            backend.auth,
+            &lc.service_label,
+            lc.level_label.as_deref(),
+            lc.default_limit,
+            lc.max_limit,
+        ))),
+        _ => None,
+    };
     let prometheus = match (resolved.prometheus, &config.prometheus) {
         (Some(backend), Some(pc)) => Some(Arc::new(prometheus::PrometheusClient::new(
             &backend.base_url,

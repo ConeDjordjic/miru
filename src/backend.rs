@@ -215,16 +215,20 @@ async fn resolve_grafana(
     let all: Vec<Datasource> = resp.json().await?;
     let proxy = |ds: &Datasource| format!("{base}/api/datasources/proxy/uid/{}", ds.uid);
 
-    // loki.datasource, falling back to the deprecated grafana.datasource alias.
-    let loki_name = config
-        .loki
-        .datasource
-        .as_deref()
-        .or(config.grafana.datasource.as_deref());
-    let loki_ds = select_datasource(&all, "loki", loki_name)?;
-    let loki = ResolvedBackend {
-        base_url: proxy(loki_ds),
-        auth: auth.clone(),
+    let loki = match &config.loki {
+        Some(lc) => {
+            // loki.datasource, falling back to the deprecated grafana.datasource alias.
+            let name = lc
+                .datasource
+                .as_deref()
+                .or(config.grafana.datasource.as_deref());
+            let ds = select_datasource(&all, "loki", name)?;
+            Some(ResolvedBackend {
+                base_url: proxy(ds),
+                auth: auth.clone(),
+            })
+        }
+        None => None,
     };
 
     let prometheus = match &config.prometheus {
@@ -238,10 +242,7 @@ async fn resolve_grafana(
         None => None,
     };
 
-    Ok(ResolvedBackends {
-        loki: Some(loki),
-        prometheus,
-    })
+    Ok(ResolvedBackends { loki, prometheus })
 }
 
 #[cfg(test)]
@@ -269,7 +270,7 @@ mod tests {
                 username: None,
                 datasource: None,
             },
-            loki: loki_config(),
+            loki: Some(loki_config()),
             prometheus: None,
         }
     }
@@ -376,7 +377,7 @@ mod tests {
             .await;
 
         let mut config = bearer_config(&server.url());
-        config.loki.datasource = Some("LokiProd".into());
+        config.loki.as_mut().unwrap().datasource = Some("LokiProd".into());
         let backend = resolve(&config).await.unwrap();
         assert_eq!(
             backend.loki.unwrap().base_url,
@@ -448,6 +449,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_prometheus_only_when_loki_absent() {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/api/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(grafana_health_body())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/datasources")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"uid":"pr","name":"Prometheus","type":"prometheus"}]"#)
+            .create_async()
+            .await;
+
+        let mut config = bearer_config(&server.url());
+        config.loki = None;
+        config.prometheus = Some(PrometheusConfig {
+            datasource: None,
+            target_points: 100,
+            max_series: 20,
+            min_step_seconds: 15,
+        });
+        let backend = resolve(&config).await.unwrap();
+        assert!(backend.loki.is_none());
+        assert_eq!(
+            backend.prometheus.unwrap().base_url,
+            format!("{}/api/datasources/proxy/uid/pr", server.url())
+        );
+    }
+
+    #[tokio::test]
     async fn strict_error_when_prometheus_configured_but_missing() {
         let mut server = Server::new_async().await;
         server
@@ -509,7 +544,7 @@ mod tests {
             .await;
 
         let mut config = bearer_config(&server.url());
-        config.loki.datasource = Some("Missing".into());
+        config.loki.as_mut().unwrap().datasource = Some("Missing".into());
         let err = resolve(&config).await.unwrap_err();
         assert!(err.to_string().contains("Missing"));
     }
