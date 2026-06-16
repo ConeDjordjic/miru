@@ -154,7 +154,7 @@ MIRU_CONFIG = "/path/to/your/config.toml"
 | `list_metrics`  | Lists Prometheus metric names with their type (counter/gauge/histogram) and help. Call this first. Optional: `filter` substring. (metrics) |
 | `query_metrics` | Runs a PromQL query. Returns a per-series summary plus data points over time, or current values with `instant=true`. (metrics) |
 
-Metric tools return an error if `[prometheus]` is not configured; log tools error if `[loki]` is not configured.
+The metric tools are only registered when `[prometheus]` is configured, and the log tools only when `[loki]` is. A backend you haven't configured simply doesn't expose its tools.
 
 ## Example prompts
 
