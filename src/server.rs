@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::transport::stdio;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -91,9 +92,27 @@ struct ListMetricsParams {
 pub struct MiruServer {
     loki: Option<Arc<LokiClient>>,
     prometheus: Option<Arc<PrometheusClient>>,
+    tool_router: ToolRouter<MiruServer>,
 }
 
-#[tool_router]
+impl MiruServer {
+    fn new(loki: Option<Arc<LokiClient>>, prometheus: Option<Arc<PrometheusClient>>) -> Self {
+        let mut tool_router = ToolRouter::new();
+        if loki.is_some() {
+            tool_router += Self::loki_router();
+        }
+        if prometheus.is_some() {
+            tool_router += Self::prometheus_router();
+        }
+        Self {
+            loki,
+            prometheus,
+            tool_router,
+        }
+    }
+}
+
+#[tool_router(router = loki_router)]
 impl MiruServer {
     #[tool(
         description = "List all service names available in Loki. Call this first to discover valid service names before querying logs."
@@ -135,7 +154,10 @@ impl MiruServer {
             Ok(lines.join("\n"))
         }
     }
+}
 
+#[tool_router(router = prometheus_router)]
+impl MiruServer {
     #[tool(
         description = "List metric names available in Prometheus, each with its type (counter, gauge, histogram) and help text. Call this first to discover metric names and whether a metric is a counter (use rate()) before writing PromQL. Optionally filter names by substring."
     )]
@@ -190,6 +212,7 @@ impl MiruServer {
 }
 
 #[tool_handler(
+    router = self.tool_router,
     name = "miru",
     version = "0.1.0",
     instructions = "Query Grafana Loki logs and Prometheus metrics via miru. When describing what you're doing, say \"using miru\" not \"using the Loki/Prometheus API\". For logs: use list_services first to discover services, then query_logs (filter by level such as error, warn, info, debug, crit, trace, and search by text or regex). For metrics: use list_metrics first to discover metric names and types, then query_metrics with PromQL (counters need rate(); set instant=true for current values). Use lookback_minutes when the current time is not known precisely. Metric tools return an error if Prometheus is not configured."
@@ -200,7 +223,7 @@ pub async fn run(
     loki: Option<Arc<LokiClient>>,
     prometheus: Option<Arc<PrometheusClient>>,
 ) -> Result<()> {
-    MiruServer { loki, prometheus }
+    MiruServer::new(loki, prometheus)
         .serve(stdio())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -263,10 +286,7 @@ mod tests {
             200,
             1000,
         ));
-        let miru = MiruServer {
-            loki: Some(loki),
-            prometheus: None,
-        };
+        let miru = MiruServer::new(Some(loki), None);
         let result = miru
             .query_logs(Parameters(QueryLogsParams {
                 service: "auth".into(),
@@ -292,10 +312,7 @@ mod tests {
             200,
             1000,
         ));
-        let miru = MiruServer {
-            loki: Some(loki),
-            prometheus: None,
-        };
+        let miru = MiruServer::new(Some(loki), None);
         let err = miru
             .query_logs(Parameters(QueryLogsParams {
                 service: "auth".into(),
@@ -324,12 +341,34 @@ mod tests {
         ))
     }
 
+    fn unreachable_prometheus() -> Arc<crate::prometheus::PrometheusClient> {
+        Arc::new(crate::prometheus::PrometheusClient::new(
+            "http://127.0.0.1:1",
+            crate::backend::Auth::None,
+            100,
+            20,
+            15,
+        ))
+    }
+
+    #[test]
+    fn router_registers_only_configured_backends() {
+        let loki_only = MiruServer::new(Some(unreachable_loki()), None);
+        assert!(loki_only.tool_router.has_route("list_services"));
+        assert!(loki_only.tool_router.has_route("query_logs"));
+        assert!(!loki_only.tool_router.has_route("list_metrics"));
+        assert!(!loki_only.tool_router.has_route("query_metrics"));
+
+        let prom_only = MiruServer::new(None, Some(unreachable_prometheus()));
+        assert!(prom_only.tool_router.has_route("list_metrics"));
+        assert!(prom_only.tool_router.has_route("query_metrics"));
+        assert!(!prom_only.tool_router.has_route("list_services"));
+        assert!(!prom_only.tool_router.has_route("query_logs"));
+    }
+
     #[tokio::test]
     async fn query_metrics_errors_when_prometheus_not_configured() {
-        let miru = MiruServer {
-            loki: Some(unreachable_loki()),
-            prometheus: None,
-        };
+        let miru = MiruServer::new(Some(unreachable_loki()), None);
         let err = miru
             .query_metrics(Parameters(QueryMetricsParams {
                 promql: "up".into(),
@@ -369,10 +408,7 @@ mod tests {
             20,
             15,
         )));
-        let miru = MiruServer {
-            loki: Some(unreachable_loki()),
-            prometheus,
-        };
+        let miru = MiruServer::new(Some(unreachable_loki()), prometheus);
         let out = miru
             .query_metrics(Parameters(QueryMetricsParams {
                 promql: "cpu".into(),
