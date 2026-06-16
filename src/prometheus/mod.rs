@@ -247,17 +247,27 @@ mod tests {
         let series = matrix_series(
             "cpu",
             "web-1",
-            &[(1686000000.0, "12"), (1686000060.0, "88"), (1686000120.0, "20")],
+            &[
+                (1686000000.0, "12"),
+                (1686000060.0, "88"),
+                (1686000120.0, "20"),
+            ],
         );
         let out = shape_matrix(&[series], 20);
         assert_eq!(out.len(), 1);
         let block = &out[0];
         assert!(block.contains(r#"cpu{instance="web-1"}"#), "got: {block}");
         assert!(block.contains("min=12"), "got: {block}");
-        assert!(block.contains("max=88@2023-06-05T21:21:00Z"), "got: {block}");
+        assert!(
+            block.contains("max=88@2023-06-05T21:21:00Z"),
+            "got: {block}"
+        );
         assert!(block.contains("avg=40"), "got: {block}");
         assert!(block.contains("last=20"), "got: {block}");
-        assert!(block.contains("\n  2023-06-05T21:20:00Z 12"), "got: {block}");
+        assert!(
+            block.contains("\n  2023-06-05T21:20:00Z 12"),
+            "got: {block}"
+        );
     }
 
     #[test]

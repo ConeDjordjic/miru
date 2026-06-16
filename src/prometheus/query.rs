@@ -71,7 +71,13 @@ mod tests {
     #[test]
     fn resolve_step_prefers_requested() {
         assert_eq!(
-            resolve_step("2026-06-12T13:00:00Z", "2026-06-12T14:00:00Z", Some(45), 100, 15),
+            resolve_step(
+                "2026-06-12T13:00:00Z",
+                "2026-06-12T14:00:00Z",
+                Some(45),
+                100,
+                15
+            ),
             45
         );
     }
@@ -80,7 +86,13 @@ mod tests {
     fn resolve_step_computes_from_window() {
         // 1h / 100 target points = 36s, above the 15s floor.
         assert_eq!(
-            resolve_step("2026-06-12T13:00:00Z", "2026-06-12T14:00:00Z", None, 100, 15),
+            resolve_step(
+                "2026-06-12T13:00:00Z",
+                "2026-06-12T14:00:00Z",
+                None,
+                100,
+                15
+            ),
             36
         );
     }
@@ -89,7 +101,13 @@ mod tests {
     fn resolve_step_respects_min_step_floor() {
         // 1m / 100 would be sub-second, so clamp up to the floor.
         assert_eq!(
-            resolve_step("2026-06-12T13:00:00Z", "2026-06-12T13:01:00Z", None, 100, 15),
+            resolve_step(
+                "2026-06-12T13:00:00Z",
+                "2026-06-12T13:01:00Z",
+                None,
+                100,
+                15
+            ),
             15
         );
     }
